@@ -343,17 +343,25 @@ def create_inbox():
         log.error(f"❌ Exception during account creation: {e}")
         raise Exception("Inbox creation failed")
 
-    time.sleep(2)
     # Get a JWT token for the account
     token_payload = {"address": email, "password": password}
-    try:
-        token_resp = requests.post(f"{API_URL}/token", json=token_payload, headers=headers, timeout=10)
-        if token_resp.status_code != 200:
-            log.error(f"❌ Failed to get JWT token: {token_resp.text}")
-            raise Exception("Inbox creation failed")
-        jwt_token = token_resp.json()["token"]
-    except Exception as e:
-        log.error(f"❌ Exception during token retrieval: {e}")
+    jwt_token = None
+    for attempt in range(5):
+        try:
+            token_resp = requests.post(f"{API_URL}/token", json=token_payload, headers=headers, timeout=10)
+            if token_resp.status_code == 200:
+                jwt_token = token_resp.json()["token"]
+                break
+            else:
+                log.warning(f"⚠️  Failed to get JWT token (attempt {attempt + 1}/5): {token_resp.text}")
+        except Exception as e:
+            log.warning(f"⚠️  Exception during token retrieval (attempt {attempt + 1}/5): {e}")
+
+        if attempt < 4:
+            time.sleep(2)
+
+    if not jwt_token:
+        log.error("❌ Failed to get JWT token after 5 attempts.")
         raise Exception("Inbox creation failed")
 
     return email, jwt_token
@@ -362,7 +370,7 @@ async def register_and_get_promo(is_last_instance=False):
     firefox_path = get_firefox_path()
     discord_register_url = 'https://discord.com/register'
     subprocess.Popen([firefox_path])
-    time.sleep(2)
+    time.sleep(10)
     pyautogui.hotkey('ctrl', 'shift', 'p')
     time.sleep(1)
     pyautogui.write(discord_register_url)
