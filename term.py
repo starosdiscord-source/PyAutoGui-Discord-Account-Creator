@@ -343,6 +343,7 @@ def create_inbox():
         log.error(f"❌ Exception during account creation: {e}")
         raise Exception("Inbox creation failed")
 
+    time.sleep(2)
     # Get a JWT token for the account
     token_payload = {"address": email, "password": password}
     try:
