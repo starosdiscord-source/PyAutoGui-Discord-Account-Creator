@@ -276,43 +276,38 @@ months = [
     "July", "August", "September", "October", "November", "December"
 ]
 
-def verify(inbox_id, inbox_token):
-    scrambled = "4O)QqiTV+(U+?Vi]qe|6..Xe"
-    def get_secret_key():
-        return ''.join([chr(ord(c) - 2) for c in scrambled])
-    def sign_payload(payload: dict, secret: str):
-        message = json.dumps(payload, separators=(',', ':')).encode()
-        key = secret.encode()
-        return hmac.new(key, message, hashlib.sha256).hexdigest()
-    secret = get_secret_key()
-    for _ in range(500):
-        ts = int(time.time() * 1000)
-        payload = {
-            "inboxId": inbox_id,
-            "inboxToken": inbox_token,
-            "ts": ts
-        }
-        payload["key"] = sign_payload(payload, secret)
-        headers = {"Content-Type": "application/json"}
+def verify(jwt_token):
+    auth_header = {"Authorization": f"Bearer {jwt_token}"}
+    log.info("🕒 Waiting for verification email...")
+    for _ in range(60):  # Poll for 60 seconds
         try:
-            response = requests.post(f"{API_URL}/inbox/v1/list", json=payload, headers=headers, timeout=10)
-            if response.status_code == 200:
-                data = response.json()
-                items = data.get("items")
-                if items:
-                    message_url = items[0].get("messageURL")
-                    if message_url:
-                        email_data = requests.get(message_url, timeout=10).json()
-                        subject = email_data.get("subject", "")
-                        if "Verify" in subject:
-                            content = email_data.get("text", "") + email_data.get("html", "")
-                            match = re.search(r'https:\/\/click\.discord\.com[^\s"\'<>\\]+', content)
-                            if match:
-                                link = match.group(0).split("\n")[0].strip()
-                                return link
-        except:
-            pass
+            # Get messages for the account
+            messages_resp = requests.get(f"{API_URL}/messages", headers=auth_header, timeout=10)
+            if messages_resp.status_code == 200:
+                messages = messages_resp.json()
+                if messages and "hydra:member" in messages and messages["hydra:member"]:
+                    # Get the ID of the first message
+                    message_id = messages["hydra:member"][0]["id"]
+                    log.info(f"✅ Received email with ID: {message_id}")
+
+                    # Get the full message content
+                    message_resp = requests.get(f"{API_URL}/messages/{message_id}", headers=auth_header, timeout=10)
+                    if message_resp.status_code == 200:
+                        message_data = message_resp.json()
+                        content = message_data.get("text", "") + "".join(message_data.get("html", []))
+
+                        # Search for the Discord verification link
+                        match = re.search(r'https:\/\/click\.discord\.com[^\s"\'<>\\]+', content)
+                        if match:
+                            link = match.group(0).split("\\n")[0].strip()
+                            log.success(f"🔗 Found verification link: {link[:30]}...")
+                            return link
+        except Exception as e:
+            log.error(f"❌ Error while fetching verification email: {e}")
         time.sleep(1)
+
+    log.error("❌ Could not find Discord verification link after 60 seconds.")
+    return None
 
 def send_notificationn(title, message):
     if not config.get("notify", False):
@@ -332,37 +327,35 @@ def send_notificationn(title, message):
 DOMAIN = config.get("mail_domain")
 API_URL = config.get("mail_api")
 def create_inbox():
-    scrambled = "4O)QqiTV+(U+?Vi]qe|6..Xe"
-    def get_secret_key():
-        return ''.join([chr(ord(c) - 2) for c in scrambled])
-    def sign_payload(payload: dict, secret: str):
-        message = json.dumps(payload, separators=(',', ':')).encode()
-        key = secret.encode()
-        return hmac.new(key, message, hashlib.sha256).hexdigest()
-    def get_random_fr_ip():
-        return f"90.{random.randint(0,255)}.{random.randint(0,255)}.{random.randint(0,255)}"
-    timestamp = int(time.time() * 1000)
-    payload = {
-        "ts": timestamp,
-        "domain": DOMAIN
-    }
-    key = get_secret_key()
-    payload["key"] = sign_payload(payload, key)
-    fake_ip = get_random_fr_ip()
-    headers = {
-        "Content-Type": "application/json",
-        "User-Agent": "Mozilla/5.0",
-        "Accept-Language": "fr-FR,fr;q=0.9",
-        "X-Forwarded-For": fake_ip,
-        "X-Real-IP": fake_ip,
-        "Via": fake_ip
-    }
-    response = httpx.post(f"{API_URL}/inbox/v2/create", json=payload, headers=headers)
-    if response.status_code == 200:
-        data = response.json()
-        return data["id"], data["token"]
-    else:
+    headers = {"Content-Type": "application/json"}
+    email_name = "".join(random.choices(string.ascii_letters + string.digits, k=10))
+    email = f"{email_name}@{DOMAIN}"
+    password = "".join(random.choices(string.ascii_letters + string.digits, k=10))
+
+    # Create an account
+    account_payload = {"address": email, "password": password}
+    try:
+        account_resp = requests.post(f"{API_URL}/accounts", json=account_payload, headers=headers, timeout=10)
+        if account_resp.status_code != 201:
+            log.error(f"❌ Failed to create email account: {account_resp.text}")
+            raise Exception("Inbox creation failed")
+    except Exception as e:
+        log.error(f"❌ Exception during account creation: {e}")
         raise Exception("Inbox creation failed")
+
+    # Get a JWT token for the account
+    token_payload = {"address": email, "password": password}
+    try:
+        token_resp = requests.post(f"{API_URL}/token", json=token_payload, headers=headers, timeout=10)
+        if token_resp.status_code != 200:
+            log.error(f"❌ Failed to get JWT token: {token_resp.text}")
+            raise Exception("Inbox creation failed")
+        jwt_token = token_resp.json()["token"]
+    except Exception as e:
+        log.error(f"❌ Exception during token retrieval: {e}")
+        raise Exception("Inbox creation failed")
+
+    return email, jwt_token
 
 async def register_and_get_promo(is_last_instance=False):
     firefox_path = get_firefox_path()
@@ -374,19 +367,20 @@ async def register_and_get_promo(is_last_instance=False):
     pyautogui.write(discord_register_url)
     pyautogui.press('enter')
     log.info(f"🕒 Loaded Register Page")
-    inbox_id, inbox_token = create_inbox()
+    email, jwt_token = create_inbox()
     send_notificationn("Ultimate", '⚠️ Once register page is loaded, press ENTER to continue')
-    log.info(f"✉️ Using {inbox_id}")
+    log.info(f"✉️ Using {email}")
     keyboard.wait('enter')
     username = generate_random_name()
     global_name = "Term </>"
-    pyautogui.write(inbox_id)
+    pyautogui.write(email)
     pyautogui.press('tab')
     pyautogui.write(global_name)
     pyautogui.press('tab')
     pyautogui.write(username)
     pyautogui.press('tab')
-    pyautogui.write(inbox_token)
+    password = "".join(random.choices(string.ascii_letters + string.digits, k=10))
+    pyautogui.write(password)
     pyautogui.press('tab')
     month = random.choice(months)
     pyautogui.write(month)
@@ -402,7 +396,7 @@ async def register_and_get_promo(is_last_instance=False):
     log.warning("⚠️ Please Solve Captcha Manually!")
     send_notificationn("Ultimate", '⚠️ Once captcha is done and account is created, press ENTER to verify email')
     keyboard.wait('enter')
-    verify_url = verify(inbox_id, inbox_token)
+    verify_url = verify(jwt_token)
     log.info("✅ Email Verification link fetched!")
     pyautogui.hotkey('ctrl', 't')
     pyautogui.write(verify_url)
@@ -413,29 +407,31 @@ async def register_and_get_promo(is_last_instance=False):
     try:
         session = requests.Session()
         payload = {
-                            'login': inbox_id,
-                            'password': inbox_token,
-                        }
+            'login': email,
+            'password': password,
+        }
         headers = {
-                            'Content-Type': 'application/json',
-                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
-                            'Origin': 'https://discord.com',
-                            'Referer': 'https://discord.com/login'
-                        }
+            'Content-Type': 'application/json',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+            'Origin': 'https://discord.com',
+            'Referer': 'https://discord.com/login'
+        }
         response = session.post('https://discord.com/api/v9/auth/login', json=payload, headers=headers)
         try:
             response_data = response.json()
             if response.status_code == 200 and 'token' in response_data:
                 token = response_data['token']
-                log.success(f"🎉 Fetched token {token[:25]}"+"***")
+                log.success(f"🎉 Fetched token for {email}: {token[:25]}***")
                 with open('tokens.txt', 'a') as f:
-                    f.write(f'{inbox_id}:{inbox_token}:{token}\n')
+                    f.write(f'{email}:{password}:{token}\n')
                     f.flush()
                     os.fsync(f.fileno())
+            else:
+                log.failure(f"❌ Failed to fetch token for {email}. Response: {response.text}")
         except json.JSONDecodeError:
-            log.failure("F❌ ailed to parse response for {email}. Response: {response.text}")
+            log.failure(f"❌ Failed to parse response for {email}. Response: {response.text}")
     except Exception as e:
-        log.error(f"❌Error getting token: {e}")
+        log.error(f"❌ Error getting token for {email}: {e}")
     if not is_last_instance and config.get("check_ratelimit", True):
         try:
             wait_time = account_ratelimit()
